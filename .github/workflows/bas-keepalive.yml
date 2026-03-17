@@ -1,0 +1,47 @@
+name: SAP BAS Keep Alive
+
+on:
+  schedule:
+    - cron: '*/25 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ping BAS to keep it alive
+        run: |
+          BAS_URL="${{ secrets.BAS_URL }}"
+          MAX_RETRY=6
+          WAIT_SEC=30
+
+          echo "⏰ $(date)"
+          echo "🎯 Target: $BAS_URL"
+
+          for i in $(seq 1 $MAX_RETRY); do
+            echo ""
+            echo "🔄 Attempt $i/$MAX_RETRY"
+
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 55 \
+              --location \
+              -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
+              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+              "$BAS_URL" 2>/dev/null || echo "000")
+
+            echo "   Status: HTTP $STATUS"
+
+            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 500 ]; then
+              echo "✅ BAS is alive!"
+              exit 0
+            fi
+
+            if [ $i -lt $MAX_RETRY ]; then
+              echo "   ⏳ Waiting ${WAIT_SEC}s..."
+              sleep $WAIT_SEC
+            fi
+          done
+
+          echo "⚠️ No response after $MAX_RETRY attempts, will retry in 25 minutes"
+          exit 0
