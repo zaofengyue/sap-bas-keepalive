@@ -1,0 +1,33 @@
+name: SAP BAS Keep Alive
+
+on:
+  schedule:
+    # 每30分钟执行一次（UTC时间）
+    - cron: '*/30 * * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install axios
+
+      - name: Wake up BAS
+        env:
+          BTP_USER: ${{ secrets.BTP_USER }}
+          BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
+          BTP_SUBDOMAIN: ${{ secrets.BTP_SUBDOMAIN }}
+          BTP_ORG_ID: ${{ secrets.BTP_ORG_ID }}
+          BAS_URL: ${{ secrets.BAS_URL }}
+        run: node .github/scripts/bas-keepalive.js
