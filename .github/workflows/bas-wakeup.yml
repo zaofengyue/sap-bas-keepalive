@@ -1,0 +1,151 @@
+name: SAP BAS Auto Wakeup (ap12)
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  wakeup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake up BAS
+        env:
+          CF_API: ${{ secrets.CF_API }}
+          CF_UAA_URL: ${{ secrets.CF_UAA_URL }}
+          CF_USER: ${{ secrets.CF_USER }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+          BAS_APP_GUID: ${{ secrets.BAS_APP_GUID }}
+          BAS_URL: ${{ secrets.BAS_URL }}
+        run: |
+          node - <<'EOF'
+          const https = require('https');
+          const { URLSearchParams } = require('url');
+
+          const CONFIG = {
+            cfApi:    process.env.CF_API     || 'https://api.cf.ap12.hana.ondemand.com',
+            uaaUrl:   process.env.CF_UAA_URL || 'https://login.cf.ap12.hana.ondemand.com',
+            user:     process.env.CF_USER,
+            password: process.env.CF_PASSWORD,
+            appGuid:  process.env.BAS_APP_GUID,
+            basUrl:   process.env.BAS_URL,
+            maxWaitMs: 5 * 60 * 1000,
+            pollIntervalMs: 15 * 1000,
+          };
+
+          function request(options, body) {
+            return new Promise((resolve, reject) => {
+              const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+                  catch { resolve({ status: res.statusCode, body: data }); }
+                });
+              });
+              req.on('error', reject);
+              req.setTimeout(30000, () => req.destroy(new Error('timeout')));
+              if (body) req.write(body);
+              req.end();
+            });
+          }
+
+          function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+          function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
+
+          async function getToken() {
+            log('🔑 Fetching CF OAuth token...');
+            const body = new URLSearchParams({
+              grant_type: 'password',
+              username: CONFIG.user,
+              password: CONFIG.password,
+              client_id: 'cf',
+              client_secret: '',
+            }).toString();
+            const url = new URL(`${CONFIG.uaaUrl}/oauth/token`);
+            const res = await request({
+              hostname: url.hostname,
+              path: url.pathname,
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json',
+              },
+            }, body);
+            if (res.status !== 200) throw new Error(`Token failed: ${res.status} ${JSON.stringify(res.body)}`);
+            log('✅ Token acquired');
+            return res.body.access_token;
+          }
+
+          async function getAppState(token) {
+            const url = new URL(`${CONFIG.cfApi}/v3/apps/${CONFIG.appGuid}`);
+            const res = await request({
+              hostname: url.hostname,
+              path: url.pathname,
+              method: 'GET',
+              headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+            });
+            if (res.status !== 200) throw new Error(`Get app failed: ${res.status}`);
+            return res.body.state;
+          }
+
+          async function startApp(token) {
+            log('🚀 Sending START command...');
+            const url = new URL(`${CONFIG.cfApi}/v3/apps/${CONFIG.appGuid}/actions/start`);
+            const res = await request({
+              hostname: url.hostname,
+              path: url.pathname,
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+            }, '{}');
+            if (res.status !== 200) throw new Error(`Start failed: ${res.status} ${JSON.stringify(res.body)}`);
+            log('✅ START command accepted');
+          }
+
+          async function waitForRunning(token) {
+            log('⏳ Waiting for BAS to start...');
+            const deadline = Date.now() + CONFIG.maxWaitMs;
+            while (Date.now() < deadline) {
+              await sleep(CONFIG.pollIntervalMs);
+              const url = new URL(`${CONFIG.cfApi}/v3/apps/${CONFIG.appGuid}/processes`);
+              const res = await request({
+                hostname: url.hostname,
+                path: url.pathname,
+                method: 'GET',
+                headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+              });
+              if (res.status === 200) {
+                const web = (res.body.resources || []).find(p => p.type === 'web');
+                if (web) {
+                  log(`  → instances: ${web.instances}`);
+                  if (web.instances > 0) { log('🟢 BAS is running!'); return true; }
+                }
+              }
+            }
+            log('⚠️  Timeout'); return false;
+          }
+
+          async function main() {
+            log('=== SAP BAS Auto Wakeup ===');
+            if (!CONFIG.user || !CONFIG.password || !CONFIG.appGuid) {
+              log('❌ Missing env vars: CF_USER, CF_PASSWORD, BAS_APP_GUID');
+              process.exit(1);
+            }
+            const token = await getToken();
+            const state = await getAppState(token);
+            log(`📊 BAS state: ${state}`);
+            if (state === 'STARTED') {
+              log('✅ Already running, nothing to do');
+              return;
+            }
+            await startApp(token);
+            await waitForRunning(token);
+          }
+
+          main().catch(err => { console.error('❌', err.message); process.exit(1); });
+          EOF
