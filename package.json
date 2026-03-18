@@ -1,0 +1,7 @@
+{
+  "name": "sap-bas-keepalive",
+  "version": "1.0.0",
+  "dependencies": {
+    "playwright": "^1.42.0"
+  }
+}
