@@ -12,8 +12,7 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-// 编辑器 URL 包含 #ws- 锚点，如 index.html#ws-pt9rm
-// 或子域名带 devSpaceId: {trialId}-{devSpaceId}.{region}.applicationstudio.cloud.sap
+// 编辑器 URL 包含 #ws- 锚点
 function isEditorUrl(url) {
   return (
     url.includes('#ws-') ||
@@ -21,17 +20,14 @@ function isEditorUrl(url) {
   );
 }
 
+// 处理各种弹窗，勾选"不再显示"后点 OK
 async function dismissDialog(page, timeoutMs = 8000) {
   try {
     await page.waitForSelector('button:has-text("OK")', { timeout: timeoutMs });
-    const checkbox = page.locator('input[type="checkbox"], input[type="checkbox"] + label').first();
-    if (await checkbox.count() > 0) {
-      const cb = page.locator('input[type="checkbox"]').first();
-      if (!(await cb.isChecked())) {
-        await cb.click();
-        log('   ☑️  Checked checkbox');
-        await page.waitForTimeout(500);
-      }
+    const cb = page.locator('input[type="checkbox"]').first();
+    if (await cb.count() > 0 && !(await cb.isChecked())) {
+      await cb.click();
+      await page.waitForTimeout(500);
     }
     await page.locator('button:has-text("OK")').first().click();
     log('✅ Dismissed dialog');
@@ -46,7 +42,7 @@ async function main() {
   log('=== SAP BAS Auto Login & Keepalive ===');
 
   if (!CONFIG.basUrl || !CONFIG.btpUser || !CONFIG.btpPassword) {
-    log('❌ Missing required env vars: BAS_URL, BTP_USER, BTP_PASSWORD');
+    log('❌ Missing env vars: BAS_URL, BTP_USER, BTP_PASSWORD');
     process.exit(1);
   }
 
@@ -62,14 +58,14 @@ async function main() {
 
   let newTabPage = null;
   context.on('page', async (newPage) => {
-    log(`📄 New tab opened: ${newPage.url()}`);
+    log(`📄 New tab: ${newPage.url()}`);
     newTabPage = newPage;
   });
 
   const page = await context.newPage();
 
   try {
-    // ── Step 1: 登录 ──
+    // ── 登录 ──
     log('🌐 Navigating to BAS...');
     await page.goto(CONFIG.basUrl, { waitUntil: 'networkidle', timeout: 60000 });
 
@@ -84,150 +80,121 @@ async function main() {
     await page.fill('input[type="password"], #j_password', CONFIG.btpPassword);
     await page.click('button[type="submit"], #logOnFormSubmit, button:has-text("Sign In"), button:has-text("Log On")');
     await page.waitForURL(/applicationstudio\.cloud\.sap/, { timeout: 60000 });
-    log(`✅ Logged in! URL: ${page.url()}`);
+    log(`✅ Logged in`);
 
-    // ── Step 2: 处理主页面弹窗 ──
+    // ── 处理登录后弹窗 ──
     await dismissDialog(page, 10000);
 
-    // ── Step 3: 等待 iframe 加载 ──
-    log('⏳ Waiting for ws-manager iframe...');
+    // ── 等待列表页 iframe 加载 ──
     await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
     await page.waitForTimeout(3000);
 
     const frame = page.frameLocator('iframe#ws-manager');
-
-    // ── Step 4: 检查空间状态 ──
-    const isStopped = await frame.locator('a.stoppedStatus, .stoppedStatus').count() > 0;
+    const isStopped = await frame.locator('a.stoppedStatus').count() > 0;
     const isRunning = await frame.locator('a.hyperlink:not(.disabled)').count() > 0;
-    log(`📊 Space status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
-    await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
+    log(`📊 Status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
 
     if (isStopped) {
-      // ── Step 5: 点击 ▶ 启动按钮 ──
-      log('▶️  Clicking Start button (#startButton0)...');
+      // ── 点击 ▶ 启动按钮 ──
+      log('▶️  Starting Dev Space...');
       await frame.locator('#startButton0').click();
-      log('✅ Start button clicked!');
+      log('✅ Start clicked');
       await page.waitForTimeout(3000);
       await dismissDialog(page, 5000);
-      await page.screenshot({ path: '/tmp/bas-after-start.png', fullPage: true });
 
-      // ── Step 6: 等待 RUNNING（最多4分钟）──
-      log('⏳ Waiting for RUNNING status (up to 4 minutes)...');
-      const startDeadline = Date.now() + 240000;
-      let isNowRunning = false;
+      // ── 等待 RUNNING（最多4分钟）──
+      log('⏳ Waiting for RUNNING (up to 4 min)...');
+      const deadline = Date.now() + 240000;
+      let running = false;
 
-      while (Date.now() < startDeadline) {
-        const remaining = Math.round((startDeadline - Date.now()) / 1000);
+      while (Date.now() < deadline) {
         await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
         await dismissDialog(page, 3000);
         await page.waitForTimeout(2000);
 
         const f = page.frameLocator('iframe#ws-manager');
         if (await f.locator('a.hyperlink:not(.disabled)').count() > 0) {
-          isNowRunning = true;
-          log('✅ Space is now RUNNING!');
+          running = true;
+          log('✅ RUNNING!');
           break;
         }
-        const starting = await f.locator('text=STARTING').count() > 0;
-        log(`   ${starting ? 'STARTING...' : 'Still STOPPED...'} (${remaining}s left)`);
+        log(`   Waiting... (${Math.round((deadline - Date.now()) / 1000)}s left)`);
         await page.waitForTimeout(10000);
       }
 
-      if (!isNowRunning) {
-        await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-        throw new Error('Space did not reach RUNNING within 4 minutes.');
-      }
+      if (!running) throw new Error('Space did not reach RUNNING within 4 minutes.');
       await page.waitForTimeout(2000);
     }
 
-    // ── Step 7: 点击空间名进入编辑器 ──
-    log('🖱️  Clicking space name to enter editor...');
+    // ── 点击空间名进入编辑器 ──
+    log('🖱️  Entering Dev Space...');
     const f = page.frameLocator('iframe#ws-manager');
-    const spaceLink = f.locator('a.hyperlink:not(.disabled)[href*="#ws-"]').first();
+    const link = f.locator('a.hyperlink:not(.disabled)[href*="#ws-"]').first();
 
-    if (await spaceLink.count() > 0) {
-      await spaceLink.click();
-      log('✅ Clicked space link');
+    if (await link.count() > 0) {
+      await link.click();
     } else {
       const nameLink = f.locator(`a.hyperlink:not(.disabled):has-text("${CONFIG.devSpaceName}")`).first();
       if (await nameLink.count() > 0) {
         await nameLink.click();
-        log(`✅ Clicked space name: "${CONFIG.devSpaceName}"`);
       } else {
-        await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
         throw new Error('Could not find clickable space link.');
       }
     }
 
     await page.waitForTimeout(3000);
 
-    // ── Step 8: 等待编辑器加载（最多3分钟）──
-    // URL 格式: index.html#ws-pt9rm 或 {trialId}-{devSpaceId}.xxx.applicationstudio.cloud.sap
-    log('⏳ Waiting for editor to load...');
+    // ── 等待编辑器加载（最多3分钟）──
+    log('⏳ Waiting for editor...');
     const editorDeadline = Date.now() + 180000;
     let editorLoaded = false;
-    let activeEditorPage = null;
+    let editorPage = null;
 
     while (Date.now() < editorDeadline) {
-      const remaining = Math.round((editorDeadline - Date.now()) / 1000);
-
       if (isEditorUrl(page.url())) {
-        activeEditorPage = page;
+        editorPage = page;
         editorLoaded = true;
-        log(`✅ Editor loaded! URL: ${page.url()}`);
         break;
       }
-
       if (newTabPage) {
         try {
           await newTabPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
           if (isEditorUrl(newTabPage.url())) {
-            activeEditorPage = newTabPage;
+            editorPage = newTabPage;
             editorLoaded = true;
-            log(`✅ Editor in new tab! URL: ${newTabPage.url()}`);
             break;
           }
         } catch {}
       }
-
       await dismissDialog(page, 2000);
-      log(`   Waiting... (${remaining}s left) URL: ${page.url()}`);
+      log(`   Waiting... (${Math.round((editorDeadline - Date.now()) / 1000)}s left)`);
       await page.waitForTimeout(8000);
     }
 
-    if (!editorLoaded) {
-      await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-      throw new Error('Editor did not load within 3 minutes.');
-    }
+    if (!editorLoaded) throw new Error('Editor did not load within 3 minutes.');
+    log(`✅ Editor loaded: ${editorPage.url()}`);
 
-    // ── Step 9: 处理编辑器内弹窗（tracking 提示等）──
-    log('🔍 Handling any dialogs inside editor...');
-    // 编辑器内的 OK 按钮（tracking 弹窗）
+    // ── 处理编辑器内弹窗 ──
     try {
-      await activeEditorPage.waitForSelector('button:has-text("OK")', { timeout: 8000 });
-      // 勾选 "Don't show this page again"
-      const dontShow = activeEditorPage.locator('input[type="checkbox"]').first();
+      await editorPage.waitForSelector('button:has-text("OK")', { timeout: 8000 });
+      const dontShow = editorPage.locator('input[type="checkbox"]').first();
       if (await dontShow.count() > 0 && !(await dontShow.isChecked())) {
         await dontShow.click();
-        log('   ☑️  Checked "Don\'t show this page again"');
-        await activeEditorPage.waitForTimeout(500);
+        await editorPage.waitForTimeout(500);
       }
-      await activeEditorPage.locator('button:has-text("OK")').first().click();
+      await editorPage.locator('button:has-text("OK")').first().click();
       log('✅ Dismissed editor dialog');
-      await activeEditorPage.waitForTimeout(1000);
     } catch {
       log('   ℹ️  No dialog in editor');
     }
 
-    // ── Step 10: 停留60秒记录活跃状态 ──
-    log(`⏳ Staying in editor for ${CONFIG.stayDurationMs / 1000}s...`);
-    await activeEditorPage.waitForTimeout(CONFIG.stayDurationMs);
-    await activeEditorPage.screenshot({ path: '/tmp/bas-editor.png' });
-    log('✅ All done! Dev Space is running and activity recorded.');
+    // ── 停留60秒记录活跃状态 ──
+    log(`⏳ Staying ${CONFIG.stayDurationMs / 1000}s...`);
+    await editorPage.waitForTimeout(CONFIG.stayDurationMs);
+    log('✅ Done! Activity recorded.');
 
   } catch (err) {
-    log(`❌ Error: ${err.message}`);
-    await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true }).catch(() => {});
+    log(`❌ ${err.message}`);
     throw err;
   } finally {
     await browser.close();
