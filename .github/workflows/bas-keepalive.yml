@@ -25,7 +25,7 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      - name: Debug - Print all buttons on list page
+      - name: Debug - Print iframe inner HTML
         env:
           BAS_URL: ${{ secrets.BAS_URL }}
           BTP_USER: ${{ secrets.BTP_USER }}
@@ -55,56 +55,28 @@ jobs:
             // 处理弹窗
             try {
               await page.waitForSelector('button:has-text("OK")', { timeout: 8000 });
-              const checkbox = page.locator('input[type="checkbox"]').first();
-              if (await checkbox.count() > 0 && !(await checkbox.isChecked())) await checkbox.click();
+              const cb = page.locator('input[type="checkbox"]').first();
+              if (await cb.count() > 0 && !(await cb.isChecked())) await cb.click();
               await page.locator('button:has-text("OK")').first().click();
               await page.waitForTimeout(1500);
             } catch {}
 
-            // 等列表加载
-            try {
-              await page.waitForSelector('text=Loading...', { timeout: 5000 });
-              await page.waitForSelector('text=Loading...', { state: 'hidden', timeout: 30000 });
-            } catch {}
-            await page.waitForTimeout(3000);
+            // 等 iframe 加载
+            await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
+            await page.waitForTimeout(5000);
 
-            // 打印页面所有按钮信息
-            const buttons = await page.evaluate(() => {
-              const els = document.querySelectorAll('button, [role="button"]');
-              return Array.from(els).map((el, i) => ({
-                index: i,
-                id: el.id || '',
-                class: (el.className || '').toString().substring(0, 100),
-                title: el.title || '',
-                ariaLabel: el.getAttribute('aria-label') || '',
-                text: (el.innerText || '').trim().substring(0, 50),
-                outerHTML: el.outerHTML.substring(0, 200),
-              }));
-            });
+            // 取 iframe 内完整 HTML
+            const frame = page.frameLocator('iframe#ws-manager');
+            const html = await frame.locator('body').innerHTML().catch(() => 'failed to get innerHTML');
 
-            console.log('\n=== ALL BUTTONS ON LIST PAGE ===');
-            buttons.forEach(b => console.log(JSON.stringify(b)));
-            console.log('=== END BUTTONS ===\n');
-
-            // 打印页面完整 HTML（用于分析结构）
-            const html = await page.content();
-            console.log('\n=== PAGE HTML (first 5000 chars) ===');
-            console.log(html.substring(0, 5000));
-            console.log('=== END HTML ===\n');
+            console.log('\n=== IFRAME INNER HTML ===');
+            console.log(html);
+            console.log('=== END IFRAME HTML ===\n');
 
             await page.screenshot({ path: '/tmp/bas-debug-list.png', fullPage: true });
-            console.log('Screenshot saved');
             await browser.close();
           })().catch(err => { console.error(err); process.exit(1); });
           EOF
-
-      - name: Login to BAS
-        env:
-          BAS_URL: ${{ secrets.BAS_URL }}
-          BTP_USER: ${{ secrets.BTP_USER }}
-          BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
-          BAS_SPACE_NAME: ${{ secrets.BAS_SPACE_NAME }}
-        run: node scripts/bas-login.js
 
       - name: Upload screenshots
         if: always()
@@ -113,3 +85,4 @@ jobs:
           name: bas-screenshots-${{ github.run_number }}
           path: /tmp/bas-*.png
           retention-days: 7
+EOF
