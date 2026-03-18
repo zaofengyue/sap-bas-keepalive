@@ -12,21 +12,29 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
+// 编辑器 URL 包含 #ws- 锚点，如 index.html#ws-pt9rm
+// 或子域名带 devSpaceId: {trialId}-{devSpaceId}.{region}.applicationstudio.cloud.sap
 function isEditorUrl(url) {
-  return /-[a-z0-9]+\.[a-z0-9]+\.applicationstudio\.cloud\.sap/.test(url);
+  return (
+    url.includes('#ws-') ||
+    /-[a-z0-9]+\.[a-z0-9]+\.applicationstudio\.cloud\.sap/.test(url)
+  );
 }
 
 async function dismissDialog(page, timeoutMs = 8000) {
   try {
     await page.waitForSelector('button:has-text("OK")', { timeout: timeoutMs });
-    const checkbox = page.locator('input[type="checkbox"]').first();
-    if (await checkbox.count() > 0 && !(await checkbox.isChecked())) {
-      await checkbox.click();
-      log('   ☑️  Checked "Do not show this message again"');
-      await page.waitForTimeout(500);
+    const checkbox = page.locator('input[type="checkbox"], input[type="checkbox"] + label').first();
+    if (await checkbox.count() > 0) {
+      const cb = page.locator('input[type="checkbox"]').first();
+      if (!(await cb.isChecked())) {
+        await cb.click();
+        log('   ☑️  Checked checkbox');
+        await page.waitForTimeout(500);
+      }
     }
     await page.locator('button:has-text("OK")').first().click();
-    log('✅ Dismissed Privacy Statement dialog');
+    log('✅ Dismissed dialog');
     await page.waitForTimeout(1500);
     return true;
   } catch {
@@ -79,10 +87,9 @@ async function main() {
     log(`✅ Logged in! URL: ${page.url()}`);
 
     // ── Step 2: 处理主页面弹窗 ──
-    log('🔍 Checking for Privacy Statement dialog...');
     await dismissDialog(page, 10000);
 
-    // ── Step 3: 等待 iframe#ws-manager 加载 ──
+    // ── Step 3: 等待 iframe 加载 ──
     log('⏳ Waiting for ws-manager iframe...');
     await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
     await page.waitForTimeout(3000);
@@ -90,47 +97,37 @@ async function main() {
     const frame = page.frameLocator('iframe#ws-manager');
 
     // ── Step 4: 检查空间状态 ──
-    // STOPPED: <a class="disabled stoppedStatus">STOPPED</a>
-    // RUNNING: <a class="hyperlink">cmliu</a> (没有 disabled)
     const isStopped = await frame.locator('a.stoppedStatus, .stoppedStatus').count() > 0;
     const isRunning = await frame.locator('a.hyperlink:not(.disabled)').count() > 0;
     log(`📊 Space status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
-
     await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
 
     if (isStopped) {
-      // ── Step 5: 点击 ▶ 启动按钮 id="startButton0" ──
+      // ── Step 5: 点击 ▶ 启动按钮 ──
       log('▶️  Clicking Start button (#startButton0)...');
       await frame.locator('#startButton0').click();
       log('✅ Start button clicked!');
-
       await page.waitForTimeout(3000);
       await dismissDialog(page, 5000);
       await page.screenshot({ path: '/tmp/bas-after-start.png', fullPage: true });
 
-      // ── Step 6: 等待状态变为 RUNNING（最多4分钟）──
+      // ── Step 6: 等待 RUNNING（最多4分钟）──
       log('⏳ Waiting for RUNNING status (up to 4 minutes)...');
       const startDeadline = Date.now() + 240000;
       let isNowRunning = false;
 
       while (Date.now() < startDeadline) {
         const remaining = Math.round((startDeadline - Date.now()) / 1000);
-
-        // 刷新页面检查状态
         await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
         await dismissDialog(page, 3000);
         await page.waitForTimeout(2000);
 
         const f = page.frameLocator('iframe#ws-manager');
-
-        // RUNNING 时链接变成可点击（没有 disabled class）
-        const runningNow = await f.locator('a.hyperlink:not(.disabled)').count() > 0;
-        if (runningNow) {
+        if (await f.locator('a.hyperlink:not(.disabled)').count() > 0) {
           isNowRunning = true;
           log('✅ Space is now RUNNING!');
           break;
         }
-
         const starting = await f.locator('text=STARTING').count() > 0;
         log(`   ${starting ? 'STARTING...' : 'Still STOPPED...'} (${remaining}s left)`);
         await page.waitForTimeout(10000);
@@ -140,23 +137,18 @@ async function main() {
         await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
         throw new Error('Space did not reach RUNNING within 4 minutes.');
       }
-
       await page.waitForTimeout(2000);
     }
 
     // ── Step 7: 点击空间名进入编辑器 ──
-    // RUNNING 时: <a class="py-2 hyperlink" href="***#ws-pt9rm">cmliu</a>
     log('🖱️  Clicking space name to enter editor...');
     const f = page.frameLocator('iframe#ws-manager');
-
-    // 用 href 包含 #ws- 来精确定位空间链接（排除其他链接）
     const spaceLink = f.locator('a.hyperlink:not(.disabled)[href*="#ws-"]').first();
 
     if (await spaceLink.count() > 0) {
       await spaceLink.click();
       log('✅ Clicked space link');
     } else {
-      // 备用：直接找空间名文字
       const nameLink = f.locator(`a.hyperlink:not(.disabled):has-text("${CONFIG.devSpaceName}")`).first();
       if (await nameLink.count() > 0) {
         await nameLink.click();
@@ -168,9 +160,9 @@ async function main() {
     }
 
     await page.waitForTimeout(3000);
-    await dismissDialog(page, 10000);
 
     // ── Step 8: 等待编辑器加载（最多3分钟）──
+    // URL 格式: index.html#ws-pt9rm 或 {trialId}-{devSpaceId}.xxx.applicationstudio.cloud.sap
     log('⏳ Waiting for editor to load...');
     const editorDeadline = Date.now() + 180000;
     let editorLoaded = false;
@@ -208,7 +200,26 @@ async function main() {
       throw new Error('Editor did not load within 3 minutes.');
     }
 
-    // ── Step 9: 停留60秒记录活跃状态 ──
+    // ── Step 9: 处理编辑器内弹窗（tracking 提示等）──
+    log('🔍 Handling any dialogs inside editor...');
+    // 编辑器内的 OK 按钮（tracking 弹窗）
+    try {
+      await activeEditorPage.waitForSelector('button:has-text("OK")', { timeout: 8000 });
+      // 勾选 "Don't show this page again"
+      const dontShow = activeEditorPage.locator('input[type="checkbox"]').first();
+      if (await dontShow.count() > 0 && !(await dontShow.isChecked())) {
+        await dontShow.click();
+        log('   ☑️  Checked "Don\'t show this page again"');
+        await activeEditorPage.waitForTimeout(500);
+      }
+      await activeEditorPage.locator('button:has-text("OK")').first().click();
+      log('✅ Dismissed editor dialog');
+      await activeEditorPage.waitForTimeout(1000);
+    } catch {
+      log('   ℹ️  No dialog in editor');
+    }
+
+    // ── Step 10: 停留60秒记录活跃状态 ──
     log(`⏳ Staying in editor for ${CONFIG.stayDurationMs / 1000}s...`);
     await activeEditorPage.waitForTimeout(CONFIG.stayDurationMs);
     await activeEditorPage.screenshot({ path: '/tmp/bas-editor.png' });
