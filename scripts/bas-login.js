@@ -4,7 +4,7 @@ const CONFIG = {
   basUrl: process.env.BAS_URL,
   btpUser: process.env.BTP_USER,
   btpPassword: process.env.BTP_PASSWORD,
-  devSpaceName: process.env.BAS_SPACE_NAME || '',  // 空间名，如 cmliu
+  devSpaceName: process.env.BAS_SPACE_NAME || '',
   stayDurationMs: 60 * 1000,
 };
 
@@ -12,12 +12,10 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-// 编辑器 URL: {trialId}-{devSpaceId}.{region}.applicationstudio.cloud.sap
 function isEditorUrl(url) {
   return /-[a-z0-9]+\.[a-z0-9]+\.applicationstudio\.cloud\.sap/.test(url);
 }
 
-// 处理 Trial 隐私声明弹窗
 async function dismissDialog(page, timeoutMs = 8000) {
   try {
     await page.waitForSelector('button:has-text("OK")', { timeout: timeoutMs });
@@ -63,189 +61,191 @@ async function main() {
   const page = await context.newPage();
 
   try {
-    // ── Step 1: 访问 BAS URL ──
+    // ── Step 1: 登录 ──
     log('🌐 Navigating to BAS...');
     await page.goto(CONFIG.basUrl, { waitUntil: 'networkidle', timeout: 60000 });
-    log(`   URL: ${page.url()}`);
 
-    // ── Step 2: 填写邮箱 ──
     log('📧 Entering email...');
-    await page.waitForSelector(
-      'input[type="email"], input[name="logonuidfield"], #j_username',
-      { timeout: 30000 }
-    );
-    await page.fill(
-      'input[type="email"], input[name="logonuidfield"], #j_username',
-      CONFIG.btpUser
-    );
+    await page.waitForSelector('input[type="email"], input[name="logonuidfield"], #j_username', { timeout: 30000 });
+    await page.fill('input[type="email"], input[name="logonuidfield"], #j_username', CONFIG.btpUser);
     const continueBtn = page.locator('button:has-text("Continue"), button:has-text("Next"), #continue');
-    if (await continueBtn.count() > 0) {
-      await continueBtn.first().click();
-      await page.waitForTimeout(2000);
-    }
+    if (await continueBtn.count() > 0) { await continueBtn.first().click(); await page.waitForTimeout(2000); }
 
-    // ── Step 3: 填写密码并提交 ──
     log('🔑 Entering password...');
     await page.waitForSelector('input[type="password"], #j_password', { timeout: 20000 });
     await page.fill('input[type="password"], #j_password', CONFIG.btpPassword);
     await page.click('button[type="submit"], #logOnFormSubmit, button:has-text("Sign In"), button:has-text("Log On")');
-    log('   Waiting for redirect...');
     await page.waitForURL(/applicationstudio\.cloud\.sap/, { timeout: 60000 });
     log(`✅ Logged in! URL: ${page.url()}`);
 
-    // ── Step 4: 处理登录后弹窗 ──
-    log('🔍 Checking for Privacy Statement dialog...');
+    // ── Step 2: 处理主页面弹窗（Privacy Statement）──
+    log('🔍 Checking for Privacy Statement dialog on main page...');
     await dismissDialog(page, 10000);
 
-    // ── Step 5: 等待列表页完全加载 ──
-    log('⏳ Waiting for Dev Spaces list to load...');
+    // ── Step 3: 等待 iframe#ws-manager 加载完成 ──
+    log('⏳ Waiting for ws-manager iframe to load...');
+    await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
+    const wsManagerFrame = page.frameLocator('iframe#ws-manager');
+
+    // 等待 iframe 内部内容加载（等待空间列表出现）
+    log('⏳ Waiting for Dev Spaces list inside iframe...');
     try {
-      await page.waitForSelector('text=Loading...', { timeout: 5000 });
-      await page.waitForSelector('text=Loading...', { state: 'hidden', timeout: 30000 });
+      // 等待 Loading 消失
+      await wsManagerFrame.locator('text=Loading...').waitFor({ timeout: 5000 });
+      await wsManagerFrame.locator('text=Loading...').waitFor({ state: 'hidden', timeout: 30000 });
       log('   Loading complete');
     } catch {
-      log('   List appears ready');
+      log('   No loading spinner, list may be ready');
     }
     await page.waitForTimeout(2000);
 
-    // 截图：列表页
+    // 截图确认列表页状态
     await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
     log('📸 List page screenshot saved');
 
-    // ── Step 6: 检查空间当前状态 ──
-    log('🔍 Checking Dev Space status...');
+    // ── Step 4: 在 iframe 内检查空间状态 ──
+    const isStopped = await wsManagerFrame.locator('text=STOPPED').count() > 0;
+    const isRunning = await wsManagerFrame.locator('text=RUNNING').count() > 0;
+    log(`📊 Space status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
 
-    const isRunning = await page.locator('text=RUNNING').count() > 0;
-    const isStopped = await page.locator('text=STOPPED').count() > 0;
-    log(`   Status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
+    // 打印 iframe 内所有按钮（调试用）
+    const iframeButtons = await wsManagerFrame.locator('button, [role="button"]').all();
+    log(`   Found ${iframeButtons.length} buttons inside iframe`);
+    for (let i = 0; i < iframeButtons.length; i++) {
+      const btn = iframeButtons[i];
+      const id = await btn.getAttribute('id').catch(() => '');
+      const cls = await btn.getAttribute('class').catch(() => '');
+      const title = await btn.getAttribute('title').catch(() => '');
+      const ariaLabel = await btn.getAttribute('aria-label').catch(() => '');
+      const text = await btn.innerText().catch(() => '');
+      log(`   btn[${i}] id="${id}" title="${title}" aria="${ariaLabel}" class="${(cls||'').substring(0,60)}" text="${text.trim().substring(0,30)}"`);
+    }
 
     if (isStopped) {
-      // ── Step 7a: 空间是 STOPPED，点击 ▶ 启动按钮 ──
-      log('▶️  Space is STOPPED, clicking Start button...');
-
-      // 启动按钮是行右侧的第一个圆形图标按钮（▶）
-      // 根据截图，按钮选择器尝试顺序：
+      // ── Step 5: 点击 ▶ 启动按钮（在 iframe 内）──
+      log('▶️  Space is STOPPED, clicking Start button inside iframe...');
       let startClicked = false;
 
-      // 方法1：找 title 或 aria-label 含 Start 的按钮
-      const startBtnByLabel = page.locator(
-        'button[title*="Start"], button[aria-label*="Start"], [title*="Start"], [aria-label*="Start"]'
-      ).first();
-      if (await startBtnByLabel.count() > 0) {
-        await startBtnByLabel.click();
-        startClicked = true;
-        log('   ✅ Clicked Start button (by aria-label)');
-      }
+      // 尝试各种选择器
+      const startSelectors = [
+        'button[title="Start"]',
+        'button[title="Run"]',
+        'button[aria-label="Start"]',
+        'button[aria-label="Run"]',
+        '[title="Start"]',
+        '[title="Run"]',
+        'button.start-btn',
+        'button.run-btn',
+        '[class*="start"]',
+        '[class*="run-btn"]',
+        '[class*="play"]',
+      ];
 
-      // 方法2：找包含 ▶ 的 SVG 图标按钮（播放图标）
-      if (!startClicked) {
-        const svgBtns = page.locator('button svg, [role="button"] svg');
-        const count = await svgBtns.count();
-        log(`   Found ${count} SVG icon buttons`);
-        // 遍历找到播放图标（circle + polygon/path 组合）
-        for (let i = 0; i < count; i++) {
-          const btn = svgBtns.nth(i);
-          const parent = btn.locator('..');
-          const html = await parent.innerHTML().catch(() => '');
-          if (html.includes('circle') || html.includes('play') || html.includes('start')) {
-            await parent.click();
-            startClicked = true;
-            log(`   ✅ Clicked Start button (SVG index ${i})`);
-            break;
-          }
+      for (const sel of startSelectors) {
+        const el = wsManagerFrame.locator(sel).first();
+        if (await el.count() > 0) {
+          await el.click();
+          startClicked = true;
+          log(`✅ Clicked Start button: ${sel}`);
+          break;
         }
       }
 
-      // 方法3：找行内所有按钮，点击第一个（截图显示▶是最左边的操作按钮）
+      // 备用：找 iframe 内右侧区域的第一个按钮
       if (!startClicked) {
-        // 先找包含 STOPPED 文字的行
-        const stoppedRow = page.locator(':has-text("STOPPED")').last();
-        if (await stoppedRow.count() > 0) {
-          const btnsInRow = stoppedRow.locator('button, [role="button"]');
-          const btnCount = await btnsInRow.count();
-          log(`   Found ${btnCount} buttons in STOPPED row`);
-          if (btnCount > 0) {
-            await btnsInRow.first().click();
-            startClicked = true;
-            log('   ✅ Clicked first button in STOPPED row');
-          }
+        log('   Trying first action button in iframe...');
+        // 空间行内的按钮（排除顶部的 Create Dev Space 按钮）
+        const allBtns = wsManagerFrame.locator('button');
+        const count = await allBtns.count();
+        log(`   Total buttons in iframe: ${count}`);
+
+        for (let i = 0; i < count; i++) {
+          const btn = allBtns.nth(i);
+          const text = await btn.innerText().catch(() => '');
+          const cls = await btn.getAttribute('class').catch(() => '');
+          // 跳过 "Create Dev Space" 按钮
+          if (text.includes('Create') || text.includes('create')) continue;
+          // 点击第一个非 Create 的按钮
+          await btn.click();
+          startClicked = true;
+          log(`✅ Clicked button[${i}] class="${cls}" text="${text.trim()}"`);
+          break;
         }
       }
 
       if (!startClicked) {
         await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-        throw new Error('Could not find Start button. Check bas-list-page.png.');
+        throw new Error('Could not find Start button inside iframe.');
       }
 
-      // ── Step 8: 等待状态从 STOPPED 变为 RUNNING ──
-      log('⏳ Waiting for space to start (STOPPED → RUNNING)...');
       await page.waitForTimeout(3000);
 
-      // 处理可能出现的弹窗
-      await dismissDialog(page, 5000);
+      // 处理点击后弹窗（在主页面检查）
+      await dismissDialog(page, 8000);
 
-      // 轮询等待 RUNNING 状态出现（最多4分钟）
+      // 截图确认点击效果
+      await page.screenshot({ path: '/tmp/bas-after-start.png', fullPage: true });
+      log('📸 After-start screenshot saved');
+
+      // ── Step 6: 等待 RUNNING 状态（最多4分钟，轮询刷新页面）──
+      log('⏳ Waiting for RUNNING status (up to 4 minutes)...');
       const startDeadline = Date.now() + 240000;
       let isNowRunning = false;
 
       while (Date.now() < startDeadline) {
         const remaining = Math.round((startDeadline - Date.now()) / 1000);
-        const runningCount = await page.locator('text=RUNNING').count();
-        const stoppingCount = await page.locator('text=STARTING').count();
 
-        if (runningCount > 0) {
+        // 刷新页面重新检查状态
+        await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+        await dismissDialog(page, 3000);
+        await page.waitForTimeout(2000);
+
+        const frame = page.frameLocator('iframe#ws-manager');
+        const runningNow = await frame.locator('text=RUNNING').count() > 0;
+
+        if (runningNow) {
           isNowRunning = true;
           log('✅ Space is now RUNNING!');
           break;
         }
 
-        log(`   Still starting... (${remaining}s left, STARTING indicators: ${stoppingCount})`);
-        await dismissDialog(page, 2000);
-        await page.waitForTimeout(8000);
+        const starting = await frame.locator('text=STARTING').count() > 0;
+        log(`   ${starting ? 'STARTING...' : 'Still waiting...'} (${remaining}s left)`);
+        await page.waitForTimeout(10000);
       }
 
       if (!isNowRunning) {
         await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-        throw new Error('Space did not reach RUNNING state within 4 minutes.');
+        throw new Error('Space did not reach RUNNING within 4 minutes.');
       }
 
       await page.waitForTimeout(2000);
-
-      // ── Step 9: 空间变为 RUNNING，点击空间名进入编辑器 ──
-      log('🖱️  Space is RUNNING, clicking space name to enter editor...');
-
-    } else if (isRunning) {
-      log('✅ Space is already RUNNING, clicking to enter editor...');
-    } else {
-      log('⚠️  Unknown status, attempting to click space name...');
     }
 
-    // ── Step 10: 点击空间名（已变成蓝色可点击状态）──
+    // ── Step 7: 点击空间名进入编辑器（在 iframe 内）──
+    log('🖱️  Clicking space name to enter editor...');
+    const frame = page.frameLocator('iframe#ws-manager');
     let enterClicked = false;
 
     if (CONFIG.devSpaceName) {
-      const nameEl = page.locator(`text="${CONFIG.devSpaceName}"`).first();
+      const nameEl = frame.locator(`text="${CONFIG.devSpaceName}"`).first();
       if (await nameEl.count() > 0) {
         await nameEl.click();
         enterClicked = true;
-        log(`🖱️  Clicked space name: "${CONFIG.devSpaceName}"`);
+        log(`✅ Clicked space name: "${CONFIG.devSpaceName}"`);
       }
     }
 
     if (!enterClicked) {
-      // 备用：找蓝色链接或可点击的空间名
-      const selectors = [
-        'a[class*="spaceName"]', 'a[class*="wsName"]',
-        '.ws-name a', '[class*="devSpaceName"] a',
-        '.sapMLnk', 'a.sapMText',
-      ];
-      for (const sel of selectors) {
-        const el = page.locator(sel).first();
+      const linkSelectors = ['a[class*="name"]', 'a[class*="space"]', 'a', '.space-name', '[class*="wsName"]'];
+      for (const sel of linkSelectors) {
+        const el = frame.locator(sel).first();
         if (await el.count() > 0) {
-          const text = await el.textContent().catch(() => '');
-          log(`   Clicking (${sel}): "${text?.trim()}"`);
+          const text = await el.innerText().catch(() => '');
+          if (text.includes('Create') || text.includes('documentation') || text.includes('restrictions')) continue;
           await el.click();
           enterClicked = true;
+          log(`✅ Clicked: ${sel} ("${text.trim()}")`);
           break;
         }
       }
@@ -253,17 +253,14 @@ async function main() {
 
     if (!enterClicked) {
       await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-      throw new Error('Could not click space name to enter editor.');
+      throw new Error('Could not click space name.');
     }
 
     await page.waitForTimeout(3000);
-
-    // ── Step 11: 处理进入时的弹窗 ──
     await dismissDialog(page, 10000);
 
-    // ── Step 12: 等待编辑器加载（最多3分钟）──
+    // ── Step 8: 等待编辑器加载（最多3分钟）──
     log('⏳ Waiting for editor to load...');
-
     const editorDeadline = Date.now() + 180000;
     let editorLoaded = false;
     let activeEditorPage = null;
@@ -277,21 +274,19 @@ async function main() {
         log(`✅ Editor loaded! URL: ${page.url()}`);
         break;
       }
-
       if (newTabPage) {
         try {
           await newTabPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
           if (isEditorUrl(newTabPage.url())) {
             activeEditorPage = newTabPage;
             editorLoaded = true;
-            log(`✅ Editor loaded in new tab! URL: ${newTabPage.url()}`);
+            log(`✅ Editor in new tab! URL: ${newTabPage.url()}`);
             break;
           }
-        } catch { /* ignore */ }
+        } catch {}
       }
-
       await dismissDialog(page, 2000);
-      log(`   Waiting for editor URL... (${remaining}s left)`);
+      log(`   Waiting... (${remaining}s left) URL: ${page.url()}`);
       await page.waitForTimeout(8000);
     }
 
@@ -300,24 +295,19 @@ async function main() {
       throw new Error('Editor did not load within 3 minutes.');
     }
 
-    // ── Step 13: 在编辑器内停留60秒 ──
+    // ── Step 9: 停留60秒记录活跃状态 ──
     log(`⏳ Staying in editor for ${CONFIG.stayDurationMs / 1000}s...`);
     await activeEditorPage.waitForTimeout(CONFIG.stayDurationMs);
     await activeEditorPage.screenshot({ path: '/tmp/bas-editor.png' });
-    log('📸 Editor screenshot saved');
-    log('✅ All done! Dev Space is running and activity recorded.');
+    log('✅ All done! Dev Space activity recorded.');
 
   } catch (err) {
     log(`❌ Error: ${err.message}`);
     await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true }).catch(() => {});
-    log('📸 Error screenshot saved');
     throw err;
   } finally {
     await browser.close();
   }
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });
