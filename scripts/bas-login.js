@@ -78,116 +78,37 @@ async function main() {
     await page.waitForURL(/applicationstudio\.cloud\.sap/, { timeout: 60000 });
     log(`✅ Logged in! URL: ${page.url()}`);
 
-    // ── Step 2: 处理主页面弹窗（Privacy Statement）──
-    log('🔍 Checking for Privacy Statement dialog on main page...');
+    // ── Step 2: 处理主页面弹窗 ──
+    log('🔍 Checking for Privacy Statement dialog...');
     await dismissDialog(page, 10000);
 
-    // ── Step 3: 等待 iframe#ws-manager 加载完成 ──
-    log('⏳ Waiting for ws-manager iframe to load...');
+    // ── Step 3: 等待 iframe#ws-manager 加载 ──
+    log('⏳ Waiting for ws-manager iframe...');
     await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
-    const wsManagerFrame = page.frameLocator('iframe#ws-manager');
+    await page.waitForTimeout(3000);
 
-    // 等待 iframe 内部内容加载（等待空间列表出现）
-    log('⏳ Waiting for Dev Spaces list inside iframe...');
-    try {
-      // 等待 Loading 消失
-      await wsManagerFrame.locator('text=Loading...').waitFor({ timeout: 5000 });
-      await wsManagerFrame.locator('text=Loading...').waitFor({ state: 'hidden', timeout: 30000 });
-      log('   Loading complete');
-    } catch {
-      log('   No loading spinner, list may be ready');
-    }
-    await page.waitForTimeout(2000);
+    const frame = page.frameLocator('iframe#ws-manager');
 
-    // 截图确认列表页状态
-    await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
-    log('📸 List page screenshot saved');
-
-    // ── Step 4: 在 iframe 内检查空间状态 ──
-    const isStopped = await wsManagerFrame.locator('text=STOPPED').count() > 0;
-    const isRunning = await wsManagerFrame.locator('text=RUNNING').count() > 0;
+    // ── Step 4: 检查空间状态 ──
+    // STOPPED: <a class="disabled stoppedStatus">STOPPED</a>
+    // RUNNING: <a class="hyperlink">cmliu</a> (没有 disabled)
+    const isStopped = await frame.locator('a.stoppedStatus, .stoppedStatus').count() > 0;
+    const isRunning = await frame.locator('a.hyperlink:not(.disabled)').count() > 0;
     log(`📊 Space status: ${isRunning ? 'RUNNING' : isStopped ? 'STOPPED' : 'UNKNOWN'}`);
 
-    // 打印 iframe 内所有按钮（调试用）
-    const iframeButtons = await wsManagerFrame.locator('button, [role="button"]').all();
-    log(`   Found ${iframeButtons.length} buttons inside iframe`);
-    for (let i = 0; i < iframeButtons.length; i++) {
-      const btn = iframeButtons[i];
-      const id = await btn.getAttribute('id').catch(() => '');
-      const cls = await btn.getAttribute('class').catch(() => '');
-      const title = await btn.getAttribute('title').catch(() => '');
-      const ariaLabel = await btn.getAttribute('aria-label').catch(() => '');
-      const text = await btn.innerText().catch(() => '');
-      log(`   btn[${i}] id="${id}" title="${title}" aria="${ariaLabel}" class="${(cls||'').substring(0,60)}" text="${text.trim().substring(0,30)}"`);
-    }
+    await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
 
     if (isStopped) {
-      // ── Step 5: 点击 ▶ 启动按钮（在 iframe 内）──
-      log('▶️  Space is STOPPED, clicking Start button inside iframe...');
-      let startClicked = false;
-
-      // 尝试各种选择器
-      const startSelectors = [
-        'button[title="Start"]',
-        'button[title="Run"]',
-        'button[aria-label="Start"]',
-        'button[aria-label="Run"]',
-        '[title="Start"]',
-        '[title="Run"]',
-        'button.start-btn',
-        'button.run-btn',
-        '[class*="start"]',
-        '[class*="run-btn"]',
-        '[class*="play"]',
-      ];
-
-      for (const sel of startSelectors) {
-        const el = wsManagerFrame.locator(sel).first();
-        if (await el.count() > 0) {
-          await el.click();
-          startClicked = true;
-          log(`✅ Clicked Start button: ${sel}`);
-          break;
-        }
-      }
-
-      // 备用：找 iframe 内右侧区域的第一个按钮
-      if (!startClicked) {
-        log('   Trying first action button in iframe...');
-        // 空间行内的按钮（排除顶部的 Create Dev Space 按钮）
-        const allBtns = wsManagerFrame.locator('button');
-        const count = await allBtns.count();
-        log(`   Total buttons in iframe: ${count}`);
-
-        for (let i = 0; i < count; i++) {
-          const btn = allBtns.nth(i);
-          const text = await btn.innerText().catch(() => '');
-          const cls = await btn.getAttribute('class').catch(() => '');
-          // 跳过 "Create Dev Space" 按钮
-          if (text.includes('Create') || text.includes('create')) continue;
-          // 点击第一个非 Create 的按钮
-          await btn.click();
-          startClicked = true;
-          log(`✅ Clicked button[${i}] class="${cls}" text="${text.trim()}"`);
-          break;
-        }
-      }
-
-      if (!startClicked) {
-        await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-        throw new Error('Could not find Start button inside iframe.');
-      }
+      // ── Step 5: 点击 ▶ 启动按钮 id="startButton0" ──
+      log('▶️  Clicking Start button (#startButton0)...');
+      await frame.locator('#startButton0').click();
+      log('✅ Start button clicked!');
 
       await page.waitForTimeout(3000);
-
-      // 处理点击后弹窗（在主页面检查）
-      await dismissDialog(page, 8000);
-
-      // 截图确认点击效果
+      await dismissDialog(page, 5000);
       await page.screenshot({ path: '/tmp/bas-after-start.png', fullPage: true });
-      log('📸 After-start screenshot saved');
 
-      // ── Step 6: 等待 RUNNING 状态（最多4分钟，轮询刷新页面）──
+      // ── Step 6: 等待状态变为 RUNNING（最多4分钟）──
       log('⏳ Waiting for RUNNING status (up to 4 minutes)...');
       const startDeadline = Date.now() + 240000;
       let isNowRunning = false;
@@ -195,22 +116,23 @@ async function main() {
       while (Date.now() < startDeadline) {
         const remaining = Math.round((startDeadline - Date.now()) / 1000);
 
-        // 刷新页面重新检查状态
+        // 刷新页面检查状态
         await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
         await dismissDialog(page, 3000);
         await page.waitForTimeout(2000);
 
-        const frame = page.frameLocator('iframe#ws-manager');
-        const runningNow = await frame.locator('text=RUNNING').count() > 0;
+        const f = page.frameLocator('iframe#ws-manager');
 
+        // RUNNING 时链接变成可点击（没有 disabled class）
+        const runningNow = await f.locator('a.hyperlink:not(.disabled)').count() > 0;
         if (runningNow) {
           isNowRunning = true;
           log('✅ Space is now RUNNING!');
           break;
         }
 
-        const starting = await frame.locator('text=STARTING').count() > 0;
-        log(`   ${starting ? 'STARTING...' : 'Still waiting...'} (${remaining}s left)`);
+        const starting = await f.locator('text=STARTING').count() > 0;
+        log(`   ${starting ? 'STARTING...' : 'Still STOPPED...'} (${remaining}s left)`);
         await page.waitForTimeout(10000);
       }
 
@@ -222,38 +144,27 @@ async function main() {
       await page.waitForTimeout(2000);
     }
 
-    // ── Step 7: 点击空间名进入编辑器（在 iframe 内）──
+    // ── Step 7: 点击空间名进入编辑器 ──
+    // RUNNING 时: <a class="py-2 hyperlink" href="***#ws-pt9rm">cmliu</a>
     log('🖱️  Clicking space name to enter editor...');
-    const frame = page.frameLocator('iframe#ws-manager');
-    let enterClicked = false;
+    const f = page.frameLocator('iframe#ws-manager');
 
-    if (CONFIG.devSpaceName) {
-      const nameEl = frame.locator(`text="${CONFIG.devSpaceName}"`).first();
-      if (await nameEl.count() > 0) {
-        await nameEl.click();
-        enterClicked = true;
+    // 用 href 包含 #ws- 来精确定位空间链接（排除其他链接）
+    const spaceLink = f.locator('a.hyperlink:not(.disabled)[href*="#ws-"]').first();
+
+    if (await spaceLink.count() > 0) {
+      await spaceLink.click();
+      log('✅ Clicked space link');
+    } else {
+      // 备用：直接找空间名文字
+      const nameLink = f.locator(`a.hyperlink:not(.disabled):has-text("${CONFIG.devSpaceName}")`).first();
+      if (await nameLink.count() > 0) {
+        await nameLink.click();
         log(`✅ Clicked space name: "${CONFIG.devSpaceName}"`);
+      } else {
+        await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
+        throw new Error('Could not find clickable space link.');
       }
-    }
-
-    if (!enterClicked) {
-      const linkSelectors = ['a[class*="name"]', 'a[class*="space"]', 'a', '.space-name', '[class*="wsName"]'];
-      for (const sel of linkSelectors) {
-        const el = frame.locator(sel).first();
-        if (await el.count() > 0) {
-          const text = await el.innerText().catch(() => '');
-          if (text.includes('Create') || text.includes('documentation') || text.includes('restrictions')) continue;
-          await el.click();
-          enterClicked = true;
-          log(`✅ Clicked: ${sel} ("${text.trim()}")`);
-          break;
-        }
-      }
-    }
-
-    if (!enterClicked) {
-      await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-      throw new Error('Could not click space name.');
     }
 
     await page.waitForTimeout(3000);
@@ -274,6 +185,7 @@ async function main() {
         log(`✅ Editor loaded! URL: ${page.url()}`);
         break;
       }
+
       if (newTabPage) {
         try {
           await newTabPage.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
@@ -285,6 +197,7 @@ async function main() {
           }
         } catch {}
       }
+
       await dismissDialog(page, 2000);
       log(`   Waiting... (${remaining}s left) URL: ${page.url()}`);
       await page.waitForTimeout(8000);
@@ -299,7 +212,7 @@ async function main() {
     log(`⏳ Staying in editor for ${CONFIG.stayDurationMs / 1000}s...`);
     await activeEditorPage.waitForTimeout(CONFIG.stayDurationMs);
     await activeEditorPage.screenshot({ path: '/tmp/bas-editor.png' });
-    log('✅ All done! Dev Space activity recorded.');
+    log('✅ All done! Dev Space is running and activity recorded.');
 
   } catch (err) {
     log(`❌ Error: ${err.message}`);
