@@ -12,14 +12,13 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-// 列表页 URL: https://99d52ed4trial.ap21.applicationstudio.cloud.sap/index.html
-// 编辑器 URL: https://99d52ed4trial-XXXXXXXX.ap21.applicationstudio.cloud.sap/index.html
-// 区别：编辑器子域名里有 trialId-devSpaceId（带短横线的额外ID）
+// 编辑器 URL 子域名格式: {trialId}-{devSpaceId}.{region}.applicationstudio.cloud.sap
+// 列表页 URL 子域名格式: {trialId}.{region}.applicationstudio.cloud.sap
 function isEditorUrl(url) {
   return /-[a-z0-9]+\.[a-z0-9]+\.applicationstudio\.cloud\.sap/.test(url);
 }
 
-// 处理 Trial 隐私声明弹窗，并勾选"不再显示"
+// 处理 Trial 隐私声明弹窗
 async function dismissDialog(page, timeoutMs = 8000) {
   try {
     await page.waitForSelector('button:has-text("OK")', { timeout: timeoutMs });
@@ -62,7 +61,6 @@ async function main() {
   });
 
   let newTabPage = null;
-
   context.on('page', async (newPage) => {
     log(`📄 New tab opened: ${newPage.url()}`);
     newTabPage = newPage;
@@ -105,82 +103,112 @@ async function main() {
     await page.waitForURL(/applicationstudio\.cloud\.sap/, { timeout: 60000 });
     log(`✅ Logged in! URL: ${page.url()}`);
 
-    // ── Step 4: 处理登录后弹出的隐私声明弹窗 ──
+    // ── Step 4: 处理登录后弹窗 ──
     log('🔍 Checking for Privacy Statement dialog (post-login)...');
     const dismissedAfterLogin = await dismissDialog(page, 10000);
     if (!dismissedAfterLogin) log('   ℹ️  No dialog after login');
 
     // ── Step 5: 截图保存列表页 ──
+    await page.waitForTimeout(2000);
     await page.screenshot({ path: '/tmp/bas-list-page.png', fullPage: true });
     log(`📸 List page screenshot saved. URL: ${page.url()}`);
 
-    // ── Step 6: 点击 Dev Space 名字进入空间 ──
-    log('📋 Looking for Dev Space to click...');
-    await page.waitForTimeout(2000);
+    // ── Step 6: 找到目标 Dev Space 并点击启动 ──
+    log('📋 Looking for Dev Space...');
 
-    let spaceClicked = false;
+    // 先找到包含空间名的行，再在那一行里找操作按钮
+    let spaceRow = null;
 
     if (CONFIG.devSpaceName) {
       log(`🎯 Looking for space: "${CONFIG.devSpaceName}"`);
-      const byName = page.locator(`text="${CONFIG.devSpaceName}"`).first();
-      if (await byName.count() > 0) {
-        await byName.click();
-        spaceClicked = true;
-        log(`🖱️  Clicked: "${CONFIG.devSpaceName}"`);
-      }
-    }
-
-    if (!spaceClicked) {
-      const selectors = [
-        '.ws-name',
-        '[class*="spaceName"]',
-        '[class*="devSpaceName"]',
-        '[class*="wsName"]',
-        '.sapMSLITitle',
-        '.sapMListItem .sapMText',
-        '[role="row"] [role="gridcell"]:first-child',
-        'table td:first-child span',
+      // 找包含空间名的容器行
+      const candidates = [
+        page.locator(`.sapMListItem:has-text("${CONFIG.devSpaceName}")`).first(),
+        page.locator(`[class*="devSpace"]:has-text("${CONFIG.devSpaceName}")`).first(),
+        page.locator(`tr:has-text("${CONFIG.devSpaceName}")`).first(),
+        page.locator(`div:has-text("${CONFIG.devSpaceName}")`).nth(1),
       ];
-      for (const sel of selectors) {
-        const el = page.locator(sel).first();
-        if (await el.count() > 0) {
-          const text = await el.textContent().catch(() => '');
-          log(`   Found (${sel}): "${text?.trim()}"`);
-          await el.click();
-          spaceClicked = true;
-          log('🖱️  Clicked Dev Space');
+      for (const candidate of candidates) {
+        if (await candidate.count() > 0) {
+          spaceRow = candidate;
+          log(`   Found space row`);
           break;
         }
       }
     }
 
-    if (!spaceClicked) {
-      throw new Error('Could not find Dev Space. Check bas-list-page.png.');
+    // 点击逻辑：优先点击行内的启动/编辑图标，其次点击空间名
+    let clicked = false;
+
+    if (spaceRow) {
+      // 尝试点击行内的最后一个图标按钮（通常是启动/打开按钮）
+      const iconBtns = spaceRow.locator('button, [role="button"], .sapUiIcon, svg');
+      const btnCount = await iconBtns.count();
+      log(`   Found ${btnCount} buttons/icons in space row`);
+
+      if (btnCount > 0) {
+        // 点击最后一个图标（截图中右边的铅笔/编辑图标）
+        await iconBtns.last().click();
+        clicked = true;
+        log('🖱️  Clicked action icon in space row');
+      }
+    }
+
+    // 备用：直接点击空间名文字
+    if (!clicked && CONFIG.devSpaceName) {
+      const nameEl = page.locator(`text="${CONFIG.devSpaceName}"`).first();
+      if (await nameEl.count() > 0) {
+        await nameEl.click();
+        clicked = true;
+        log(`🖱️  Clicked space name: "${CONFIG.devSpaceName}"`);
+      }
+    }
+
+    // 再备用：点击第一个可见的空间名（任何文字元素）
+    if (!clicked) {
+      const selectors = [
+        '.ws-name', '[class*="spaceName"]', '[class*="wsName"]',
+        '.sapMSLITitle', '.sapMListItem .sapMText',
+      ];
+      for (const sel of selectors) {
+        const el = page.locator(sel).first();
+        if (await el.count() > 0) {
+          const text = await el.textContent().catch(() => '');
+          log(`   Fallback click (${sel}): "${text?.trim()}"`);
+          await el.click();
+          clicked = true;
+          break;
+        }
+      }
+    }
+
+    if (!clicked) {
+      throw new Error('Could not find Dev Space element. Check bas-list-page.png.');
     }
 
     await page.waitForTimeout(3000);
 
-    // ── Step 7: 处理点击空间名后弹出的隐私声明弹窗 ──
+    // ── Step 7: 处理点击后弹出的隐私声明弹窗 ──
     log('🔍 Checking for Privacy Statement dialog (post-click)...');
     const dismissedAfterClick = await dismissDialog(page, 10000);
     if (!dismissedAfterClick) log('   ℹ️  No dialog after click');
 
-    // ── Step 8: 等待编辑器加载（最多3分钟）──
-    // 编辑器 URL 子域名格式: {trialId}-{devSpaceId}.{region}.applicationstudio.cloud.sap
-    log('⏳ Waiting for editor URL (subdomain will change to include dev space ID)...');
+    // ── Step 8: 等待 Dev Space 启动并进入编辑器（最多5分钟，STOPPED状态启动需要时间）──
+    log('⏳ Waiting for Dev Space to start and editor to load (up to 5 minutes)...');
+    log('   (Space may need time to start from STOPPED state)');
 
-    const deadline = Date.now() + 180000;
+    const deadline = Date.now() + 300000; // 5分钟
     let editorLoaded = false;
     let activeEditorPage = null;
 
     while (Date.now() < deadline) {
       const remaining = Math.round((deadline - Date.now()) / 1000);
 
-      // 检查当前页
+      // 检查当前页 URL 是否变成编辑器格式
       if (isEditorUrl(page.url())) {
         activeEditorPage = page;
         editorLoaded = true;
-        log(`✅ Editor loaded! URL: ${page.url()}`);
+        log(`✅ Editor loaded in current tab! URL: ${page.url()}`);
         break;
       }
 
@@ -197,14 +225,16 @@ async function main() {
         } catch { /* ignore */ }
       }
 
+      // 处理等待过程中可能出现的弹窗
       await dismissDialog(page, 2000);
-      log(`   current: ${page.url()} (${remaining}s left)`);
-      await page.waitForTimeout(5000);
+
+      log(`   Waiting... URL: ${page.url()} (${remaining}s left)`);
+      await page.waitForTimeout(8000);
     }
 
     if (!editorLoaded) {
       await page.screenshot({ path: '/tmp/bas-error.png', fullPage: true });
-      throw new Error('Editor did not load within 3 minutes. Check bas-error.png.');
+      throw new Error('Editor did not load within 5 minutes. Check bas-error.png.');
     }
 
     // ── Step 9: 在编辑器内停留60秒 ──
