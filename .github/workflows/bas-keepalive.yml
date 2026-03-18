@@ -1,46 +1,41 @@
-const { chromium } = require('playwright');
+name: SAP BAS Keep Alive (Auto Login)
 
-(async () => {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 },
-  });
-  const page = await context.newPage();
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
-  // 登录
-  await page.goto(process.env.BAS_URL, { waitUntil: 'networkidle', timeout: 60000 });
-  await page.waitForSelector('input[type="email"], input[name="logonuidfield"], #j_username', { timeout: 30000 });
-  await page.fill('input[type="email"], input[name="logonuidfield"], #j_username', process.env.BTP_USER);
-  const btn = page.locator('button:has-text("Continue"), button:has-text("Next"), #continue');
-  if (await btn.count() > 0) { await btn.first().click(); await page.waitForTimeout(2000); }
-  await page.waitForSelector('input[type="password"], #j_password', { timeout: 20000 });
-  await page.fill('input[type="password"], #j_password', process.env.BTP_PASSWORD);
-  await page.click('button[type="submit"], #logOnFormSubmit, button:has-text("Sign In"), button:has-text("Log On")');
-  await page.waitForURL(/applicationstudio\.cloud\.sap/, { timeout: 60000 });
-  console.log('Logged in:', page.url());
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-  // 处理弹窗
-  try {
-    await page.waitForSelector('button:has-text("OK")', { timeout: 8000 });
-    const cb = page.locator('input[type="checkbox"]').first();
-    if (await cb.count() > 0 && !(await cb.isChecked())) await cb.click();
-    await page.locator('button:has-text("OK")').first().click();
-    await page.waitForTimeout(1500);
-  } catch {}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  // 等 iframe 加载
-  await page.waitForSelector('iframe#ws-manager', { timeout: 30000 });
-  await page.waitForTimeout(5000);
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-  // 取 iframe 内完整 HTML
-  const frame = page.frameLocator('iframe#ws-manager');
-  const html = await frame.locator('body').innerHTML().catch(() => 'failed');
+      - name: Install dependencies
+        run: npm install
 
-  console.log('\n=== IFRAME INNER HTML ===');
-  console.log(html);
-  console.log('=== END IFRAME HTML ===');
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
 
-  await page.screenshot({ path: '/tmp/bas-debug-list.png', fullPage: true });
-  await browser.close();
-})().catch(err => { console.error(err); process.exit(1); });
+      - name: Debug - Print iframe inner HTML
+        env:
+          BAS_URL: ${{ secrets.BAS_URL }}
+          BTP_USER: ${{ secrets.BTP_USER }}
+          BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
+        run: node scripts/bas-debug.js
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bas-screenshots-${{ github.run_number }}
+          path: /tmp/bas-*.png
+          retention-days: 7
