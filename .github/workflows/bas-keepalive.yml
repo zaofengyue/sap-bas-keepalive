@@ -25,12 +25,13 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      - name: Debug - Print iframe inner HTML
+      - name: Login to BAS
         env:
           BAS_URL: ${{ secrets.BAS_URL }}
           BTP_USER: ${{ secrets.BTP_USER }}
           BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
-        run: node scripts/bas-debug.js
+          BAS_SPACE_NAME: ${{ secrets.BAS_SPACE_NAME }}
+        run: node scripts/bas-login.js
 
       - name: Upload screenshots
         if: always()
