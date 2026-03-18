@@ -1,8 +1,8 @@
-name: SAP BAS Keep Alive (Auto Login)
+name: SAP BAS Keep Alive
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 * * * *'   # 每小时执行一次
   workflow_dispatch:
 
 jobs:
@@ -32,11 +32,3 @@ jobs:
           BTP_PASSWORD: ${{ secrets.BTP_PASSWORD }}
           BAS_SPACE_NAME: ${{ secrets.BAS_SPACE_NAME }}
         run: node scripts/bas-login.js
-
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bas-screenshots-${{ github.run_number }}
-          path: /tmp/bas-*.png
-          retention-days: 7
