@@ -40,7 +40,7 @@ Playwright 模拟浏览器登录 BTP
 
 ### 第一步：Fork 本仓库
 
-点击右上角 **Fork**，复制到自己账号下。
+点击右上角 **Fork**，复制到自己账号下，并将仓库设为 **Public**（免费无限额度）。
 
 ### 第二步：配置 GitHub Secrets
 
@@ -60,6 +60,21 @@ Playwright 模拟浏览器登录 BTP
 **Actions → SAP BAS Keep Alive → Run workflow**
 
 看到 `✅ Done! Activity recorded.` 即表示成功。
+
+---
+
+## 多账号支持
+
+多个账号之间用 `;` 分隔，顺序一一对应即可，无需其他改动。
+
+| Secret 名称 | 多账号示例 |
+|---|---|
+| `BAS_URL` | `https://xxx.ap21...;https://yyy.ap10...` |
+| `BTP_USER` | `user1@example.com;user2@example.com` |
+| `BTP_PASSWORD` | `password1;password2` |
+| `BAS_SPACE_NAME` | `spaceName1;spaceName2` |
+
+日志中每个账号以 `[Account1]`、`[Account2]` 区分输出。
 
 ---
 
