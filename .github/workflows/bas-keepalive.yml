@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write       # 允许提交代码
+      contents: write
 
     steps:
       - name: Checkout
@@ -42,4 +42,5 @@ jobs:
           echo "Last run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > .last-run
           git add .last-run
           git diff --staged --quiet || git commit -m "chore: keepalive $(date -u '+%Y-%m-%d %H:%M')"
+          git pull --rebase origin main
           git push
